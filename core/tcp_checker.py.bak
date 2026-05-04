@@ -1,0 +1,119 @@
+# core/tcp_checker.py
+# Stage 1: TCP connect + TLS handshake with SNI
+# 
+# Why TLS handshake matters:
+#   - TCP connect only checks if port 443 is open
+#   - TLS handshake confirms the CDN actually routes our SNI correctly
+#   - A CDN IP might accept TCP but reject our SNI → false positive without TLS check
+
+import ssl
+import socket
+import time
+
+
+def tcp_tls_probe(ip: str, port: int, sni: str, timeout: float = 3.0) -> dict:
+    """
+    Stage 1: TCP connect + TLS handshake with SNI.
+
+    Why two steps:
+        Step A - TCP connect: checks if IP:port is reachable at all
+        Step B - TLS handshake: checks if CDN routes our SNI correctly
+
+    Args:
+        ip:      target IP to test (e.g. "13.224.47.1")
+        port:    target port (almost always 443)
+        sni:     Server Name Indication (e.g. "eworks.gtgpv2.space")
+        timeout: seconds before giving up
+
+    Returns:
+        {
+            "ok":         True / False,
+            "latency_ms": float or None,   # measured at TLS handshake completion
+            "error":      ""   or str      # empty string on success
+        }
+    """
+
+    start = time.perf_counter()
+
+    try:
+        # ─────────────────────────────────────────────────────────
+        # Build SSL context
+        #
+        # Why ssl.create_default_context():
+        #   - loads system CA certificates automatically
+        #   - enables hostname checking by default
+        #   - safer than SSLContext() from scratch
+        #
+        # Why check_hostname = False + verify_mode = CERT_NONE:
+        #   - CDN IPs are shared → certificate may not match the IP
+        #   - We only care about TLS handshake success (routing check)
+        #   - NOT about certificate validity
+        # ─────────────────────────────────────────────────────────
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        # ─────────────────────────────────────────────────────────
+        # Step A: TCP connect
+        # create_connection does the raw TCP 3-way handshake
+        # ─────────────────────────────────────────────────────────
+        raw_sock = socket.create_connection((ip, port), timeout=timeout)
+
+        # ─────────────────────────────────────────────────────────
+        # Step B: TLS handshake
+        #
+        # server_hostname = sni:
+        #   This is the critical part.
+        #   xray will later send the same SNI in its TLS ClientHello.
+        #   If CDN rejects this SNI here → it will reject xray too.
+        #   So this probe is a faithful simulation of what xray does.
+        #
+        # do_handshake_on_connect=True:
+        #   Perform handshake immediately inside wrap_socket()
+        #   so we can measure the full round-trip latency.
+        # ─────────────────────────────────────────────────────────
+        tls_sock = ctx.wrap_socket(
+            raw_sock,
+            server_hostname=sni,
+            do_handshake_on_connect=True,
+        )
+
+        # Measure latency at handshake completion
+        # This is the most meaningful latency:
+        # it includes TCP + TLS negotiation = real-world connection cost
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        # Clean close - send TLS close_notify alert
+        tls_sock.close()
+
+        return {
+            "ok":         True,
+            "latency_ms": round(latency_ms, 1),
+            "error":      "",
+        }
+
+    except socket.timeout:
+        return _fail("tcp timeout")
+
+    except ConnectionRefusedError:
+        return _fail("connection refused")
+
+    except ssl.SSLError as e:
+        # TLS handshake failed (wrong SNI, cert issue, etc.)
+        return _fail(f"tls error: {e.reason}")
+
+    except OSError as e:
+        # Network unreachable, host unreachable, etc.
+        return _fail(f"os error: {e.strerror}")
+
+    except Exception as e:
+        return _fail(str(e))
+
+
+def _fail(error: str) -> dict:
+    """Returns a standardized failure result."""
+    return {
+        "ok":         False,
+        "latency_ms": None,
+        "error":      error,
+    }
