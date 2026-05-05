@@ -250,7 +250,7 @@ DOH_PROVIDERS = [       # DNS fallback servers
 
 ## Credits
 
-**Original Author:** Iranian developer  
+  
 **AI Assistant:** Claude Sonnet 4.5 (Anthropic)  
 **xray-core:** https://github.com/XTLS/Xray-core
 
