@@ -1,24 +1,22 @@
 # scanner.py
-# ─────────────────────────────────────────────────────────────────────────────
-# CDN Scanner - Main Scanner File
-# This file connects all core modules and builds a complete pipeline:
-#   1. Parse vless link
-#   2. Extract CDN targets (domain / IP / CIDR)
-#   3. Resolve DNS -> IP list
-#   4. Fast TCP ping (pre-filter)
-#   5. Real xray test (final filter)
-#   6. Build new links with good IPs
-# ─────────────────────────────────────────────────────────────────────────────
+# CDN Scanner — CLI interface
+# Same pipeline as main.py but without WebSocket/FastAPI.
+#
+# Pipeline:
+#   Stage 0 — Parse template + build candidates
+#   Stage 1 — TCP:443 + TLS handshake (per-candidate SNI)
+#   Stage 2 — DNS fallback for failed domains → re-test in Stage 1
+#   Stage 3 — Xray tunnel validation
 
 import sys
 import time
+import ipaddress
 import concurrent.futures
 
 from core import (
     parse_vless,
-    extract_targets,
     resolve_domain,
-    tcp_ping_batch,
+    tcp_ping,
     validate_with_xray,
     build_vless_link,
     TCP_PORT,
@@ -28,284 +26,520 @@ from core import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main scanner function
+# Helpers (mirrors main.py, no FastAPI dependency)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _classify_single(value: str) -> dict:
+    value = value.strip()
+    try:
+        ipaddress.ip_address(value)
+        return {"type": "ip", "value": value}
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return {"type": "cidr", "value": value}
+    except ValueError:
+        pass
+    return {"type": "domain", "value": value}
+
+
+def _expand_cidr(cidr: str, max_ips: int = 65536) -> list[str]:
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+        return [str(ip) for ip in list(network.hosts())[:max_ips]]
+    except ValueError:
+        return []
+
+
+def _build_candidates(
+    raw_targets: list[dict],
+    mode: str,
+    template_sni: str,
+) -> list[dict]:
+    """
+    Convert raw targets to pipeline candidates.
+
+    Candidate:
+      connect_to    — IP or domain to TCP-connect to
+      sni           — SNI for TLS handshake
+      mode          — "mode1" or "mode2"
+      source_domain — domain for DNS fallback (None = no fallback)
+    """
+    candidates: list[dict] = []
+
+    for t in raw_targets:
+        ttype = t["type"]
+
+        if mode == "mode1":
+            if ttype == "csv":
+                candidates.append({
+                    "connect_to":    t["ip"],
+                    "sni":           t["domain"],
+                    "mode":          mode,
+                    "source_domain": t["domain"],
+                })
+            elif ttype == "domain":
+                candidates.append({
+                    "connect_to":    t["value"],
+                    "sni":           t["value"],
+                    "mode":          mode,
+                    "source_domain": t["value"],
+                })
+            elif ttype == "ip":
+                candidates.append({
+                    "connect_to":    t["value"],
+                    "sni":           template_sni,
+                    "mode":          mode,
+                    "source_domain": None,
+                })
+            elif ttype == "cidr":
+                for ip in _expand_cidr(t["value"]):
+                    candidates.append({
+                        "connect_to":    ip,
+                        "sni":           template_sni,
+                        "mode":          mode,
+                        "source_domain": None,
+                    })
+
+        else:  # mode2
+            if ttype == "ip":
+                candidates.append({
+                    "connect_to":    t["value"],
+                    "sni":           template_sni,
+                    "mode":          mode,
+                    "source_domain": None,
+                })
+            elif ttype == "cidr":
+                for ip in _expand_cidr(t["value"]):
+                    candidates.append({
+                        "connect_to":    ip,
+                        "sni":           template_sni,
+                        "mode":          mode,
+                        "source_domain": None,
+                    })
+            elif ttype in ("domain", "csv"):
+                domain = t.get("value") or t.get("domain", "")
+                if domain:
+                    candidates.append({
+                        "connect_to":    domain,
+                        "sni":           template_sni,
+                        "mode":          mode,
+                        "source_domain": domain,
+                    })
+
+    return candidates
+
+
+def _run_stage1_batch(
+    candidates: list[dict],
+    port:       int,
+    log,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Stage 1: TCP:443 + TLS handshake for every candidate.
+    Prints a progress line every 10% for large batches.
+    Returns: (passed, failed_domains)
+    """
+    if not candidates:
+        return [], []
+
+    passed:         list[dict] = []
+    failed_domains: list[dict] = []
+    done_count = 0
+    total      = len(candidates)
+    workers    = min(MAX_WORKERS, total)
+
+    # Print progress at 10% intervals for large batches
+    report_every = max(1, total // 10)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_candidate = {
+            executor.submit(tcp_ping, c["connect_to"], port, c["sni"]): c
+            for c in candidates
+        }
+        for future in concurrent.futures.as_completed(future_to_candidate):
+            c = future_to_candidate[future]
+            try:
+                result = future.result()
+                if result["ok"]:
+                    passed.append(c)
+                elif c.get("source_domain"):
+                    failed_domains.append(c)
+            except Exception:
+                if c.get("source_domain"):
+                    failed_domains.append(c)
+
+            done_count += 1
+            if total > 100 and done_count % report_every == 0:
+                pct = int(done_count / total * 100)
+                log(f"      TCP progress: {done_count}/{total} ({pct}%) | passed so far: {len(passed)}")
+
+    return passed, failed_domains
+
+
+def _run_stage2(
+    failed_candidates: list[dict],
+    custom_dns: str,
+    log,
+) -> list[dict]:
+    """
+    Stage 2: DNS fallback for domains that failed Stage 1.
+    Returns new candidates to be re-checked in Stage 1.
+    """
+    new_candidates: list[dict] = []
+    seen_ips: set[str] = set()
+
+    for fc in failed_candidates:
+        domain = fc["source_domain"]
+        if not domain:
+            continue
+
+        ips = resolve_domain(domain, custom_dns=custom_dns)
+
+        if ips:
+            log(f"      DNS fallback: {domain} → {len(ips)} IP(s)")
+            for ip in ips:
+                if ip not in seen_ips:
+                    seen_ips.add(ip)
+                    new_candidates.append({
+                        "connect_to":    ip,          # TCP test uses IP
+                        "sni":           fc["sni"],
+                        "mode":          fc["mode"],
+                        "source_domain": domain,      # KEEP original domain for final config!
+                        "resolved_ip":   ip,
+                    })
+        else:
+            log(f"      WARN: {domain} → could not resolve via any DNS")
+
+    return new_candidates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main scan function
 # ─────────────────────────────────────────────────────────────────────────────
 
 def scan(
-    vless_link: str,
-    max_results: int = 10,
-    xray_workers: int = 5,
-    verbose: bool = True,
+    vless_link:  str,
+    mode:        str  = "mode2",
+    targets_raw: str  = "",
+    custom_dns:  str  = "",
+    max_results: int  = 10,
+    xray_workers:int  = 5,
+    skip_xray:   bool = False,
+    verbose:     bool = True,
 ) -> list[dict]:
     """
-    Takes a vless link and finds the best CDN IPs.
+    Find the best CDN IPs for a vless link.
 
     Args:
-        vless_link:   Original vless link
-        max_results:  Maximum number of good results to return
-        xray_workers: Number of parallel workers for xray testing
-        verbose:      Show progress in terminal
+        vless_link:   Original vless:// link
+        mode:         "mode1" (Netlify/Vercel) or "mode2" (CF/CloudFront)
+        targets_raw:  Newline-separated targets (CSV/IP/CIDR/domain).
+                      Leave blank to use the link's own address.
+        custom_dns:   Custom DNS server IP for Stage 2 fallback (e.g. "8.8.8.8")
+        max_results:  Maximum good results to return
+        xray_workers: Parallel workers for xray validation
+        skip_xray:    If True, skip Stage 3 and return Stage 1 survivors only
+        verbose:      Print progress to terminal
 
     Returns:
-        List of result dicts, sorted by latency (ascending):
-        [
-            {
-                "ip":         "1.2.3.4",
-                "ok":         True,
-                "latency_ms": 123.4,
-                "error":      "",
-                "link":       "vless://..."
-            },
-            ...
-        ]
+        List of result dicts sorted by latency (best first):
+        [{"connect_to", "sni", "mode", "ok", "latency_ms", "link"}, ...]
     """
 
     def log(msg: str):
-        # Only print if verbose mode is enabled
         if verbose:
             print(msg)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Step 1: Parse vless link
-    # ─────────────────────────────────────────────────────────────────────────
-    log("\n[1/5] Parsing vless link...")
+    # ── Stage 0A: Parse VLESS link ───────────────────────────────────────────
+    log(f"\n[Stage 0] Parsing vless link...")
 
     parsed = parse_vless(vless_link)
     if not parsed:
         log("ERROR: Invalid vless link!")
         return []
 
-    log(f"      OK - UUID     : {parsed['uuid'][:8]}...")
-    log(f"      OK - Address  : {parsed['address']}")
-    log(f"      OK - Transport: {parsed['type']}")
-    log(f"      OK - SNI      : {parsed.get('sni', '-')}")
-    log(f"      OK - Host     : {parsed.get('host', '-')}")
+    log(f"  uuid      : {parsed['uuid'][:8]}...")
+    log(f"  address   : {parsed['address']}")
+    log(f"  transport : {parsed['type']}")
+    log(f"  security  : {parsed['security']}")
+    log(f"  sni       : {parsed.get('sni', '-')}")
+    log(f"  host      : {parsed.get('host', '-')}")
+    log(f"  mode      : {mode}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Step 2: Extract CDN targets
-    # FIX: extract_targets expects a dict (parsed), NOT a list of strings
-    # It reads "address", "host", "sni" keys internally from the dict
-    # ─────────────────────────────────────────────────────────────────────────
-    log("\n[2/5] Extracting CDN targets...")
+    # ── Stage 0B: Build candidates ───────────────────────────────────────────
+    template_sni = (
+        parsed.get("host")
+        or parsed.get("sni")
+        or parsed.get("address", "")
+    )
+    port = parsed.get("port", TCP_PORT)
 
-    # Pass the full parsed dict directly - extract_targets reads address/host/sni itself
-    targets = extract_targets(parsed)
+    if targets_raw.strip():
+        # Parse the provided targets
+        raw_targets = _parse_targets_text(targets_raw)
+    else:
+        # Use only the link's address as the single target
+        raw_targets = [_classify_single(parsed.get("address", ""))]
 
-    if not targets:
-        log("ERROR: No targets found!")
+    candidates = _build_candidates(raw_targets, mode, template_sni)
+
+    if not candidates:
+        log(f"ERROR: No valid candidates for mode={mode}")
         return []
 
-    log(f"      OK - {len(targets)} target(s) found:")
-    for t in targets[:5]:
-        # each target is a dict: {"value": "...", "type": "domain"/"ip"/"cidr"}
-        log(f"           [{t['type']:6s}] {t['value']}")
+    log(f"\n  {len(candidates)} candidate(s) ready")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Step 3: Resolve DNS -> IP list
-    # Only domain-type targets need DNS resolution
-    # IP-type targets are already IPs, add them directly
-    # ─────────────────────────────────────────────────────────────────────────
-    log("\n[3/5] Resolving DNS...")
+    # ── Stage 1: TCP:443 + TLS handshake ────────────────────────────────────
+    log(f"\n[Stage 1] TCP+TLS check on {len(candidates)} candidate(s) (port {port})...")
 
-    all_ips: list[str] = []
+    stage1_passed, failed_domains = _run_stage1_batch(candidates, port, log)
 
-    for target in targets:
-        if target["type"] == "ip":
-            # Already an IP, no DNS needed
-            all_ips.append(target["value"])
-            log(f"      OK - {target['value']} -> direct IP (no DNS needed)")
+    log(f"  {len(stage1_passed)} passed | {len(failed_domains)} domain(s) for DNS fallback")
 
-        elif target["type"] == "domain":
-            # Resolve domain to IPs via DNS over HTTPS
-            ips = resolve_domain(target["value"])
-            if ips:
-                preview = ips[:3]
-                suffix = "..." if len(ips) > 3 else ""
-                log(f"      OK - {target['value']} -> {len(ips)} IP(s): {preview}{suffix}")
-                all_ips.extend(ips)
+    # ── Stage 2: DNS fallback ────────────────────────────────────────────────
+    if failed_domains:
+        log(f"\n[Stage 2] DNS fallback for {len(failed_domains)} domain(s)...")
+
+        stage2_resolved = _run_stage2(failed_domains, custom_dns, log)
+
+        if stage2_resolved:
+            log(f"  Re-checking {len(stage2_resolved)} resolved IP(s) in Stage 1...")
+            s2_passed, _ = _run_stage1_batch(stage2_resolved, port, log)
+            stage1_passed.extend(s2_passed)
+            log(f"  {len(s2_passed)} additional IP(s) passed")
+
+    log(f"\n  {len(stage1_passed)} candidate(s) ready for xray validation")
+
+    if not stage1_passed:
+        log("ERROR: No candidate passed TCP check!")
+        return []
+
+    # ── Stage 3: Xray validation ─────────────────────────────────────────────
+    if skip_xray:
+        log("\n[Stage 3] Skipped (fast mode)")
+        results = []
+        for c in stage1_passed[:max_results]:
+            # Mode 1: Use original domain as address
+            # Mode 2: Use IP as address
+            if c["mode"] == "mode1" and c.get("source_domain"):
+                config_address = c["source_domain"]
             else:
-                log(f"      WARN - {target['value']} -> could not resolve")
+                config_address = c["connect_to"]
 
-    # Remove duplicates while preserving order
-    all_ips = list(dict.fromkeys(all_ips))
+            results.append({
+                "connect_to": c["connect_to"],
+                "sni":        c["sni"],
+                "mode":       c["mode"],
+                "ok":         True,
+                "latency_ms": None,
+                "link":       build_vless_link(parsed, config_address, c["sni"], c["mode"], None),
+                "source_domain": c.get("source_domain"),
+            })
+        return results
 
-    if not all_ips:
-        log("ERROR: No IPs resolved!")
-        return []
-
-    log(f"      OK - Total unique IPs: {len(all_ips)}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Step 4: Fast TCP ping (pre-filter)
-    # This quickly eliminates unreachable IPs before the slow xray test
-    # ─────────────────────────────────────────────────────────────────────────
-    log(f"\n[4/5] TCP ping on {len(all_ips)} IP(s) (port {TCP_PORT})...")
-
-    tcp_results = tcp_ping_batch(all_ips, port=TCP_PORT, max_workers=MAX_WORKERS)
-
-    # Keep only IPs that responded to TCP
-    alive_ips = [r["ip"] for r in tcp_results if r["ok"]]
-
-    log(f"      OK - {len(alive_ips)} alive out of {len(all_ips)}")
-
-    if not alive_ips:
-        log("ERROR: No IP responded to TCP!")
-        return []
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Step 5: Real xray test (final filter)
-    # Each worker gets a unique worker_id to use a different local port
-    # This prevents port conflicts when running multiple xray instances
-    # ─────────────────────────────────────────────────────────────────────────
-    log(f"\n[5/5] xray testing {len(alive_ips)} IP(s) with {xray_workers} parallel worker(s)...")
-    log(f"      Please wait, this may take a few minutes...")
+    log(f"\n[Stage 3] Xray validation: {len(stage1_passed)} candidate(s) | {xray_workers} worker(s)...")
+    log(f"  Timeout per test: {XRAY_TIMEOUT}s — please wait...")
 
     xray_results: list[dict] = []
     good_count = 0
 
-    # Use ThreadPoolExecutor for parallel execution
     with concurrent.futures.ThreadPoolExecutor(max_workers=xray_workers) as executor:
-
-        # Submit each IP with a unique worker_id to avoid port conflicts between xray instances
-        future_to_ip = {
+        future_to_candidate = {
             executor.submit(
                 validate_with_xray,
-                parsed,              # original parsed config dict
-                ip,                  # IP being tested
-                TCP_PORT,            # port (443)
-                idx % xray_workers,  # unique worker_id (0, 1, 2, ...)
-            ): ip
-            for idx, ip in enumerate(alive_ips)
+                parsed,
+                c,
+                port,
+                idx % xray_workers,
+            ): c
+            for idx, c in enumerate(stage1_passed)
         }
 
-        # Collect results as they complete (not in submission order)
-        for future in concurrent.futures.as_completed(future_to_ip):
-            ip = future_to_ip[future]
+        for future in concurrent.futures.as_completed(future_to_candidate):
+            c = future_to_candidate[future]
             try:
                 result = future.result()
                 xray_results.append(result)
 
                 if result["ok"]:
                     good_count += 1
-                    log(f"      PASS  {ip:20s} -> {result['latency_ms']:7.1f} ms")
+                    log(f"  PASS  {result['connect_to']:30s} → {result['latency_ms']:7.1f} ms")
                 else:
-                    log(f"      FAIL  {ip:20s} -> {result['error']}")
+                    log(f"  FAIL  {c['connect_to']:30s} → {result['error']}")
 
-                # Early exit: if we already have enough good results, cancel the rest
+                # Early exit if we have enough good results
                 if good_count >= max_results * 2:
-                    log(f"\n      TARGET REACHED: {good_count} good results - cancelling remaining")
-                    for f in future_to_ip:
+                    log(f"\n  Target reached ({good_count} good) — cancelling remaining")
+                    for f in future_to_candidate:
                         f.cancel()
                     break
 
             except Exception as e:
-                log(f"      ERROR {ip} -> unexpected error: {e}")
+                log(f"  ERROR {c['connect_to']} → {e}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Process final results
-    # ─────────────────────────────────────────────────────────────────────────
-
-    # Keep only successful results
     good_results = [r for r in xray_results if r["ok"]]
 
     if not good_results:
-        log("\nERROR: No IP passed the xray test!")
+        log("\nERROR: No candidate passed xray validation!")
         return []
 
-    # Sort by latency ascending (best first)
     good_results.sort(key=lambda x: x["latency_ms"])
-
-    # Keep only top max_results
     good_results = good_results[:max_results]
 
-    # Build a new vless link for each good IP
     final_results = []
-    for result in good_results:
-        new_link = build_vless_link(parsed, result["ip"])
-        result["link"] = new_link
-        final_results.append(result)
+    for r in good_results:
+        # Mode 1: Use original domain as address
+        # Mode 2: Use IP as address
+        if r["mode"] == "mode1" and r.get("source_domain"):
+            config_address = r["source_domain"]
+        else:
+            config_address = r["connect_to"]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Print summary
-    # ─────────────────────────────────────────────────────────────────────────
+        r["link"] = build_vless_link(parsed, config_address, r["sni"], r["mode"], r["latency_ms"])
+        final_results.append(r)
+
     log(f"\n{'=' * 60}")
-    log(f"TOP RESULTS - {len(final_results)} best IP(s):")
+    log(f"TOP {len(final_results)} RESULT(S):")
     log(f"{'=' * 60}")
-
     for i, r in enumerate(final_results, 1):
-        log(f"  {i:2d}. {r['ip']:20s} | {r['latency_ms']:7.1f} ms | {r['link'][:60]}...")
-
+        log(f"  {i:2d}. {r['connect_to']:30s} | {r['latency_ms']:7.1f} ms")
+        log(f"      {r['link']}")
     log(f"{'=' * 60}\n")
 
     return final_results
 
 
+def _parse_targets_text(text: str) -> list[dict]:
+    """Parse newline-separated target text (same logic as main.py)."""
+    results = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 3:
+                domain_part = parts[0]
+                ip_part     = parts[2]
+                if domain_part:
+                    try:
+                        ipaddress.ip_address(ip_part)
+                        results.append({"type": "csv", "domain": domain_part, "ip": ip_part})
+                    except ValueError:
+                        results.append({"type": "domain", "value": domain_part})
+            continue
+
+        if "/" in line:
+            try:
+                ipaddress.ip_network(line, strict=False)
+                results.append({"type": "cidr", "value": line})
+            except ValueError:
+                pass
+            continue
+
+        try:
+            ipaddress.ip_address(line)
+            results.append({"type": "ip", "value": line})
+            continue
+        except ValueError:
+            pass
+
+        if "." in line and " " not in line and len(line) > 3:
+            results.append({"type": "domain", "value": line})
+
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Command line entry point
+# CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     """
-    Run scanner from command line:
-        python scanner.py "vless://..."
-        python scanner.py "vless://..." --max 5 --workers 3
-        python scanner.py "vless://..." --output results.txt
+    Usage:
+        python scanner.py "vless://..." --mode mode1
+        python scanner.py "vless://..." --mode mode2 --max 5 --workers 3
+        python scanner.py "vless://..." --targets targets.txt --output results.txt
     """
-
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="CDN Scanner - Find the best CDN IPs for a vless link"
+        description="CDN Scanner — Find the best CDN IPs for a vless link"
     )
-
+    parser.add_argument("link", help="vless:// link")
     parser.add_argument(
-        "link",
-        help="Original vless link"
+        "--mode", choices=["mode1", "mode2"], default="mode2",
+        help="mode1=Netlify/Vercel (domain-based), mode2=CF/CloudFront (IP-based) [default: mode2]"
     )
-
     parser.add_argument(
-        "--max",
-        type=int,
-        default=10,
-        dest="max_results",
-        help="Maximum number of results (default: 10)"
+        "--targets", type=str, default=None, dest="targets_file",
+        help="Path to a file with targets (CSV/IP/CIDR/domain, one per line)"
     )
-
     parser.add_argument(
-        "--workers",
-        type=int,
-        default=5,
-        dest="xray_workers",
-        help="Number of parallel xray workers (default: 5)"
+        "--dns", type=str, default="", dest="custom_dns",
+        help="Custom DNS server IP for Stage 2 fallback (e.g. 8.8.8.8)"
     )
-
     parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        dest="output_file",
-        help="Save final links to a file (optional)"
+        "--max", type=int, default=10, dest="max_results",
+        help="Maximum number of results [default: 10]"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=5, dest="xray_workers",
+        help="Parallel xray workers [default: 5]"
+    )
+    parser.add_argument(
+        "--skip-xray", action="store_true", dest="skip_xray",
+        help="Skip Stage 3 xray validation (TCP check only, faster)"
+    )
+    parser.add_argument(
+        "--output", type=str, default=None, dest="output_file",
+        help="Save final links to a file (one per line)"
     )
 
     args = parser.parse_args()
 
-    # Run the scan
+    targets_raw = ""
+    if args.targets_file:
+        try:
+            with open(args.targets_file, encoding="utf-8") as f:
+                targets_raw = f.read()
+        except Exception as e:
+            print(f"ERROR reading targets file: {e}")
+            sys.exit(1)
+
+    # Validate custom DNS if provided (supports multiple IPs separated by comma)
+    if args.custom_dns.strip():
+        dns_input = args.custom_dns.strip()
+        dns_list = [d.strip() for d in dns_input.replace('\n', ',').split(',') if d.strip()]
+
+        for dns in dns_list:
+            parts = dns.split(".")
+            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                print(f"ERROR: Invalid DNS IP address: {dns}")
+                sys.exit(1)
+
     start_time = time.time()
     results = scan(
         vless_link=args.link,
+        mode=args.mode,
+        targets_raw=targets_raw,
+        custom_dns=args.custom_dns,
         max_results=args.max_results,
         xray_workers=args.xray_workers,
+        skip_xray=args.skip_xray,
         verbose=True,
     )
     elapsed = time.time() - start_time
 
-    print(f"Total time: {elapsed:.1f} seconds")
+    print(f"Total time: {elapsed:.1f}s")
 
     if not results:
-        print("No results found!")
+        print("No results found.")
         sys.exit(1)
 
-    # Save to file if --output was provided
     if args.output_file:
         try:
             with open(args.output_file, "w", encoding="utf-8") as f:

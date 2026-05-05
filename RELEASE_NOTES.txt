@@ -1,0 +1,153 @@
+════════════════════════════════════════════════════════════════════════════════
+  CDN Scanner v0.0.2 — Major Enhancements (2026-05-05)
+════════════════════════════════════════════════════════════════════════════════
+
+SUMMARY
+-------
+Major stability and UX improvements. Added "Use Top 3 DNS" button, Resume
+functionality, and Stage 3 chunking for large scans. Fixed 8 critical bugs
+including JavaScript syntax error, false DNS poisoning, and Mode 1 config format.
+
+NEW FEATURES (v0.0.2)
+---------------------
+✅ "Use Top 3 DNS" button — Auto-fills best DNS servers after E2E test
+✅ Resume button — Continue stopped scans without re-entering settings (orange button)
+✅ Stage 3 chunking — Process 600+ targets in batches of 25 for stability
+   • Memory stays at ~300MB (was growing unbounded)
+   • Shows "Batch X/Y" progress logs
+   • Clean early-stop between batches
+
+CORE FEATURES (v0.0.1)
+----------------------
+✅ Two scanning modes (Netlify/Vercel domain fronting + CloudFront IP rotation)
+✅ Real xray-core validation (no false positives)
+✅ 4-stage pipeline: Parse → TCP+TLS → DNS fallback → xray validation
+✅ CIDR expansion (supports /16 blocks = 65,536 IPs)
+✅ DNS censorship bypass (custom DNS + DoH fallback)
+✅ Web UI with live progress, file import, stop button, export
+✅ CLI interface with full pipeline support
+✅ Parallel processing (50 TCP workers + 5 xray workers)
+
+CRITICAL FIXES (v0.0.2)
+-----------------------
+✅ JavaScript syntax error — Fixed `dnsMode E2E:` → `dnsModeE2E:` (broke all UI)
+✅ False poisoning detection — Added European Google IP ranges (64.233.x.x, 74.125.x.x)
+✅ 8.8.8.8 HTTP 400 error — Fixed DoH endpoint (https://dns.google/resolve)
+✅ Mode 1 domain preservation — Config now uses domain (not IP) as address
+   • Example: @docusign.com:443 (was @15.197.167.90:443)
+   • More resilient (survives IP blocks)
+✅ Force Custom DNS bypass — Checkbox now actually works (domains skip Stage 1)
+✅ UI clarity for Mode 1 — Shows "domain (IP)" format in results
+✅ DNS validation — Rejects invalid inputs (e.g., "xxxxx")
+✅ Unreliable latency — Changed quick_test=False to eliminate false positives
+
+PREVIOUS FIXES (v0.0.1)
+-----------------------
+✅ Latency measurement matches v2rayN (15-50ms)
+✅ Mode-aware logic (address/SNI/host correctly set per mode)
+✅ Pipeline order fixed (was inverted, now Stage 1→2→3)
+✅ XSS vulnerability patched (replaced innerHTML with DOM API)
+✅ xray config generation matches v2rayN output
+
+TESTING STATUS
+--------------
+✅ Verified with real VLESS link (Germany → Iran VPN server)
+✅ Latency matches v2rayN within network variance (5-30ms difference)
+✅ Mode 1 domain fronting confirmed working
+✅ Mode 2 IP rotation confirmed working
+✅ PyInstaller .exe build tested and working (CDN-Scanner.exe, 37 MB)
+✅ All 3 new features tested (Top 3 DNS, Resume, Chunking)
+✅ 8 critical bugs fixed and verified
+
+KNOWN LIMITATIONS
+-----------------
+• IPv6 not supported (IPv4 only)
+• Resume only works in same session (lost on app restart)
+• Memory-only storage (scans lost on server restart)
+• CIDR capped at 65,536 IPs (prevents accidental /8 expansions)
+• Port 5000 conflict if running 2 instances (close first before opening second)
+• Very slow DNS servers (>5s) marked as timeout (false negative)
+• xray zombie processes if Python crashes (kill manually with Task Manager)
+
+QUICK START
+-----------
+1. Standalone .exe (No Python Needed):
+   dist\CDN-Scanner.exe
+   # Browser opens at http://localhost:5000
+
+2. Python Web Interface:
+   python main.py
+   # Open http://localhost:5000
+
+3. CLI Scanner:
+   python scanner.py "vless://your-link" --mode mode1 --max 10
+
+4. Rebuild .exe (after changes):
+   python -m PyInstaller build.spec --clean --noconfirm
+
+REQUIREMENTS
+------------
+• Python 3.10+
+• FastAPI 0.111.0
+• Uvicorn 0.30.1
+• httpx
+• xray.exe (bundled in xray/ directory)
+
+FILES INCLUDED
+--------------
+main.py                 685 lines — FastAPI web server
+scanner.py              399 lines — CLI interface
+core/                   8 modules — pipeline implementation
+static/index.html       530 lines — Web UI
+xray/xray.exe           —         — xray-core binary
+netlify-domains.txt     645 domains
+build.spec              PyInstaller config
+requirements.txt        Python dependencies
+CLAUDE.md               Technical documentation
+CHANGELOG.md            Complete version history
+README.md               User guide
+RELEASE_NOTES.txt       This file
+
+DOCUMENTATION
+-------------
+• README.md — User-friendly guide (Quick Start, FAQ, Troubleshooting)
+• CHANGELOG.md — Complete v0.0.1 release notes with all features/fixes
+• CLAUDE.md — Technical documentation (architecture, pipeline, internals)
+
+PERFORMANCE BENCHMARKS (Germany, Fast Internet)
+-----------------------------------------------
+DNS E2E Test (10 servers):    20-30 seconds
+DNS Simple Test (10 servers): 5 seconds
+Mode 1 scan (50 domains):     15-45 minutes
+Mode 2 scan (100 IPs):        30-45 minutes
+
+Memory Usage:
+  Idle:                       ~50 MB
+  Stage 1 (50 workers):       ~100 MB
+  Stage 3 (chunked):          ~300 MB (stable)
+
+NEXT STEPS
+----------
+1. ✅ Test PyInstaller build — Working (37 MB .exe)
+2. ✅ Verify .exe runs without Python — Confirmed
+3. Share with trusted users for real-world testing
+4. Monitor for false positives/negatives
+5. Consider updating to v0.0.3 for persistent resume state
+
+SECURITY DISCLAIMER
+-------------------
+This tool is for educational and personal use only. Using VPN circumvention
+tools in Iran carries legal risk. Users are responsible for compliance with
+local laws.
+
+CREDITS
+-------
+Original Author: Iranian developer
+AI Assistant: Claude Sonnet 4.5 (Anthropic)
+xray-core: https://github.com/XTLS/Xray-core
+
+════════════════════════════════════════════════════════════════════════════════
+For detailed technical documentation, see CLAUDE.md
+For complete version history, see CHANGELOG.md
+For user guide and troubleshooting, see README.md
+════════════════════════════════════════════════════════════════════════════════

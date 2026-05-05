@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# PyInstaller
+build/
+dist/
+*.spec.backup
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary
+*.log
+*.tmp
+test_*.html
+
+# User data (optional - uncomment if you don't want to commit these)
+# netlify-domains.txt

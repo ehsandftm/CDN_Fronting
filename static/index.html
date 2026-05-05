@@ -1,0 +1,875 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDN Scanner</title>
+    <style>
+        /* CSS Definitions - Dark Theme optimized for Windows utilities */
+        :root {
+            --bg: #1e1e1e;
+            --surface: #2d2d30;
+            --surface-light: #3e3e42;
+            --text: #cccccc;
+            --text-muted: #858585;
+            --primary: #007acc;
+            --primary-hover: #0098ff;
+            --danger: #f48771;
+            --success: #89d185;
+            --border: #3e3e42;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: Consolas, 'Courier New', monospace;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 15px;
+            margin-top: -5px;
+        }
+
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--text-muted);
+        }
+
+        textarea, input[type="text"] {
+            background-color: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 10px;
+            border-radius: 4px;
+            font-family: Consolas, monospace;
+            resize: vertical;
+        }
+
+        textarea {
+            min-height: 60px;
+        }
+
+        .preview-box {
+            background-color: var(--bg);
+            border: 1px dashed var(--text-muted);
+            padding: 10px;
+            color: var(--success);
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            word-break: break-all;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            background-color: var(--surface-light);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 8px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+
+        button:hover:not(:disabled) {
+            background-color: var(--primary);
+            color: #fff;
+            border-color: var(--primary-hover);
+        }
+
+        button.primary {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Progress Bar Styles */
+        .progress-wrapper {
+            margin-bottom: 20px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+
+        progress {
+            width: 100%;
+            height: 10px;
+            accent-color: var(--success);
+        }
+
+        /* Table Styles */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 15px;
+            font-size: 0.95em;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-muted);
+            border-bottom: 2px solid var(--border);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            background-color: var(--surface-light);
+        }
+
+        .log-box {
+            background-color: var(--bg);
+            border: 1px solid var(--border);
+            padding: 10px;
+            height: 250px;
+            overflow-y: auto;
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-top: 15px;
+        }
+
+        .danger-text {
+            color: var(--danger) !important;
+            margin-bottom: 0 !important;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <span>CDN Scanner</span>
+        <span id="version-display">Xray: Loading...</span>
+    </div>
+
+    <div class="form-row">
+        <label>Mode:</label>
+        <label><input type="radio" name="mode" value="mode1" checked> Mode1 (Netlify/Domain)</label>
+        <label><input type="radio" name="mode" value="mode2"> Mode2 (CF/IP)</label>
+    </div>
+
+    <div class="form-group">
+        <label for="template">Template (vless://):</label>
+        <textarea id="template" placeholder="Paste vless:// link here..."></textarea>
+    </div>
+
+    <div class="preview-box" id="preview">
+        [Config Preview will appear here after paste]
+    </div>
+
+    <div class="form-group">
+        <label for="targets">Targets (CSV / IP / CIDR / Domain):</label>
+        <textarea id="targets" placeholder="Optional: Leave blank to use targets embedded inside the template link..."></textarea>
+        <div style="margin-top: 5px;">
+            <input type="file" id="file-import" accept=".txt,.csv" style="display: none;">
+            <button id="btn-import-file" type="button">📁 Import from File</button>
+            <span id="file-status" style="margin-left: 10px; color: var(--text-muted); font-size: 0.9em;"></span>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="dns">Custom DNS (Optional - supports multiple, comma-separated):</label>
+        <textarea id="dns" rows="2" placeholder="e.g. 8.8.8.8, 1.1.1.1, 9.9.9.9 (or one per line)"></textarea>
+        <div style="margin-top: 5px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <button id="btn-test-dns" style="padding: 5px 10px; font-size: 0.85em;">🧪 Test DNS Servers</button>
+            <button id="btn-use-top3-dns" style="padding: 5px 10px; font-size: 0.85em; display: none;">🎯 Use Top 3 DNS</button>
+            <label style="font-size: 0.85em; display: flex; align-items: center; gap: 5px;">
+                <input type="checkbox" id="dns-mode-e2e" checked>
+                E2E Test (slower, more accurate)
+            </label>
+        </div>
+        <div id="dns-results" style="margin-top: 10px; display: none; background: var(--surface-light); border: 1px solid var(--border); border-radius: 4px; padding: 10px; max-height: 300px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- NEW: Smart Routing Checkbox -->
+    <div class="checkbox-row">
+        <input type="checkbox" id="force-dns" value="true">
+        <label for="force-dns" class="danger-text">⚡ Force Custom DNS (Bypass Stage 1 Poisoning - Domains Only)</label>
+    </div>
+
+    <!-- Advanced Controls -->
+    <div class="form-row" style="margin-top: 10px;">
+        <div style="flex: 1;">
+            <label for="max-results" style="font-size: 0.9em;">Max Results (0=unlimited):</label>
+            <input type="number" id="max-results" value="0" min="0" max="1000" style="width: 100px;">
+        </div>
+        <div style="flex: 1;">
+            <label for="max-workers" style="font-size: 0.9em;">xray Workers (1-10):</label>
+            <input type="number" id="max-workers" value="5" min="1" max="10" style="width: 100px;">
+        </div>
+    </div>
+
+    <div class="actions">
+        <button id="btn-start" class="primary">▶ Start</button>
+        <button id="btn-stop" disabled>■ Stop</button>
+        <button id="btn-resume" disabled style="background: var(--warning); color: white;">⏯️ Resume</button>
+    </div>
+
+    <div class="progress-wrapper">
+        <div class="progress-header">
+            <span id="progress-status">Idle</span>
+            <span id="progress-percent">0%</span>
+        </div>
+        <progress id="progress-bar" max="100" value="0"></progress>
+    </div>
+
+    <table id="results-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Target</th>
+                <th>Latency</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody id="results-body">
+            <!-- Results injected here -->
+        </tbody>
+    </table>
+
+    <div class="actions">
+        <button id="btn-copy-all">📋 Copy All Good Links</button>
+        <button id="btn-export-file">💾 Export to File</button>
+    </div>
+
+    <div class="log-box" id="log-box"></div>
+</div>
+
+<script>
+    // ════════════════════════════════════════════════════════════
+    // CDN Scanner - Frontend Logic
+    // ════════════════════════════════════════════════════════════
+
+    let currentSocket = null;
+    let currentScanId = null;
+    let validLinks = [];
+    let resultCount = 0;
+    let allResults = [];  // Store all results with latency for sorting
+    let topDnsServers = []; // Store top 3 DNS from test results
+    let lastStoppedScan = null; // Store last scan config for resume
+
+    const els = {
+        modeRadios: document.querySelectorAll('input[name="mode"]'),
+        template: document.getElementById('template'),
+        preview: document.getElementById('preview'),
+        targets: document.getElementById('targets'),
+        dns: document.getElementById('dns'),
+        forceDns: document.getElementById('force-dns'),
+        maxResults: document.getElementById('max-results'),
+        maxWorkers: document.getElementById('max-workers'),
+        btnStart: document.getElementById('btn-start'),
+        btnStop: document.getElementById('btn-stop'),
+        btnResume: document.getElementById('btn-resume'),
+        btnCopyAll: document.getElementById('btn-copy-all'),
+        btnExportFile: document.getElementById('btn-export-file'),
+        btnImportFile: document.getElementById('btn-import-file'),
+        btnTestDns: document.getElementById('btn-test-dns'),
+        btnUseTop3Dns: document.getElementById('btn-use-top3-dns'),
+        dnsModeE2E: document.getElementById('dns-mode-e2e'),
+        dnsResults: document.getElementById('dns-results'),
+        fileImport: document.getElementById('file-import'),
+        fileStatus: document.getElementById('file-status'),
+        progBar: document.getElementById('progress-bar'),
+        progStatus: document.getElementById('progress-status'),
+        progPercent: document.getElementById('progress-percent'),
+        tbody: document.getElementById('results-body'),
+        logBox: document.getElementById('log-box'),
+        version: document.getElementById('version-display')
+    };
+
+    function getSelectedMode() {
+        for (const radio of els.modeRadios) {
+            if (radio.checked) return radio.value;
+        }
+        return "mode1";
+    }
+
+    fetch('/health')
+        .then(res => res.json())
+        .then(data => els.version.textContent = `${data.app} v${data.version}`)
+        .catch(() => els.version.textContent = "Backend Offline");
+
+    els.template.addEventListener('input', () => {
+        const link = els.template.value.trim();
+        if (!link.startsWith('vless://')) {
+            els.preview.textContent = "Invalid or empty vless link.";
+            return;
+        }
+        try {
+            const url = new URL(link);
+            const params = new URLSearchParams(url.search);
+            const alias = decodeURIComponent(url.hash.substring(1) || '-');
+            
+            els.preview.textContent = 
+                `Alias: ${alias} | Addr: ${url.hostname} | Port: ${url.port || 443} | ` +
+                `Type: ${params.get('type') || 'tcp'} | TLS: ${params.get('security') || 'none'} | ` +
+                `SNI: ${params.get('sni') || '-'} | Host: ${params.get('host') || '-'}`;
+        } catch (e) {
+            els.preview.textContent = "Error parsing template.";
+        }
+    });
+
+    function addLog(msg) {
+        const time = new Date().toLocaleTimeString();
+        els.logBox.innerHTML += `<div>[${time}] ${msg}</div>`;
+        els.logBox.scrollTop = els.logBox.scrollHeight;
+    }
+
+    els.btnStart.addEventListener('click', async () => {
+        const link = els.template.value.trim();
+        if (!link.startsWith('vless://')) {
+            alert('Please provide a valid vless:// template link.');
+            return;
+        }
+
+        els.btnStart.disabled = true;
+        els.btnStop.disabled = false;
+        els.tbody.innerHTML = '';
+        els.logBox.innerHTML = '';
+        els.progBar.value = 0;
+        els.progPercent.textContent = '0%';
+        validLinks = [];
+        resultCount = 0;
+        allResults = [];  // Reset results array for new scan
+        addLog('Requesting scan initialization...');
+
+        try {
+            // Build full request payload with all controls
+            const reqBody = {
+                link: link,
+                skip_xray: false,
+                mode: getSelectedMode(),
+                targets_raw: els.targets.value.trim(),
+                custom_dns: els.dns.value.trim(),
+                force_custom_dns: els.forceDns.checked,
+                max_results: parseInt(els.maxResults.value) || 0,
+                max_workers: parseInt(els.maxWorkers.value) || 5
+            };
+
+            const response = await fetch('/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reqBody)
+            });
+
+            const data = await response.json();
+            if (!data.ok) {
+                throw new Error(data.detail || "Failed to start scan");
+            }
+
+            currentScanId = data.scan_id;
+            addLog(`Scan created! ID: ${data.scan_id.substring(0, 8)}`);
+            connectWebSocket(data.scan_id);
+
+        } catch (error) {
+            addLog(`❌ Error: ${error.message}`);
+            els.btnStart.disabled = false;
+            els.btnStop.disabled = true;
+        }
+    });
+
+    function connectWebSocket(scanId) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/${scanId}`;
+        currentSocket = new WebSocket(wsUrl);
+
+        currentSocket.onopen = () => addLog('🟢 WebSocket Connected. Waiting for engine...');
+
+        currentSocket.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "ping") return;
+
+            const payload = msg.payload || {};
+
+            switch (msg.type) {
+                case "progress":
+                    els.progBar.value = payload.value;
+                    els.progPercent.textContent = `${payload.value}%`;
+                    els.progStatus.textContent = `Running: ${payload.step || ''}`;
+                    break;
+                case "log":
+                    addLog(payload.msg);
+                    break;
+                case "result":
+                    validLinks.push(payload.link);
+                    allResults.push({
+                        ip: payload.ip,
+                        latency_ms: payload.latency_ms,
+                        link: payload.link
+                    });
+                    resultCount++;
+                    const row = document.createElement('tr');
+
+                    let latencyColor = 'var(--text)';
+                    if (payload.latency_ms < 2500) latencyColor = 'var(--success)';      // Fast: < 2.5s
+                    else if (payload.latency_ms > 4000) latencyColor = 'var(--danger)';  // Slow: > 4s
+                    // Medium: 2.5s - 4s stays default color
+
+                    // Create cells safely (no XSS vulnerability)
+                    const rankCell = document.createElement('td');
+                    rankCell.textContent = `#${resultCount}`;
+                    rankCell.style.color = 'var(--text-muted)';
+
+                    const ipCell = document.createElement('td');
+                    const ipStrong = document.createElement('strong');
+                    ipStrong.textContent = payload.ip;
+                    ipCell.appendChild(ipStrong);
+
+                    const latencyCell = document.createElement('td');
+                    latencyCell.textContent = `${payload.latency_ms} ms`;
+                    latencyCell.style.color = latencyColor;
+
+                    const actionCell = document.createElement('td');
+                    const copyBtn = document.createElement('button');
+                    copyBtn.textContent = 'Copy';
+                    copyBtn.addEventListener('click', () => {
+                        navigator.clipboard.writeText(payload.link).then(() => {
+                            copyBtn.textContent = '✓ Copied';
+                            setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+                        });
+                    });
+                    actionCell.appendChild(copyBtn);
+
+                    row.appendChild(rankCell);
+                    row.appendChild(ipCell);
+                    row.appendChild(latencyCell);
+                    row.appendChild(actionCell);
+                    els.tbody.appendChild(row);
+                    break;
+                case "done":
+                    addLog(`✅ Scan Complete. Found ${payload.total_results} valid IPs.`);
+                    els.progStatus.textContent = "Done";
+
+                    // Re-sort and rebuild table with correct ranking
+                    if (allResults.length > 0) {
+                        allResults.sort((a, b) => a.latency_ms - b.latency_ms);
+                        rebuildResultsTable();
+                    } else {
+                        addLog('⚠️ No valid IPs found. Try different targets or increase timeout.');
+                    }
+
+                    finishScan();
+                    break;
+                case "error":
+                    addLog(`❌ Engine Error: ${payload.msg}`);
+                    els.progStatus.textContent = "Error";
+                    finishScan();
+                    break;
+            }
+        };
+
+        currentSocket.onclose = () => {
+            addLog('🔴 WebSocket Closed.');
+            finishScan();
+        };
+    }
+
+    function rebuildResultsTable() {
+        // Clear and rebuild table with sorted results
+        els.tbody.innerHTML = '';
+
+        allResults.forEach((result, index) => {
+            const row = document.createElement('tr');
+
+            let latencyColor = 'var(--text)';
+            if (result.latency_ms < 2500) latencyColor = 'var(--success)';
+            else if (result.latency_ms > 4000) latencyColor = 'var(--danger)';
+
+            const rankCell = document.createElement('td');
+            rankCell.textContent = `#${index + 1}`;
+            rankCell.style.color = 'var(--text-muted)';
+
+            const ipCell = document.createElement('td');
+            const ipStrong = document.createElement('strong');
+            ipStrong.textContent = result.ip;
+            ipCell.appendChild(ipStrong);
+
+            const latencyCell = document.createElement('td');
+            latencyCell.textContent = `${result.latency_ms} ms`;
+            latencyCell.style.color = latencyColor;
+
+            const actionCell = document.createElement('td');
+            const copyBtn = document.createElement('button');
+            copyBtn.textContent = 'Copy';
+            copyBtn.addEventListener('click', () => {
+                navigator.clipboard.writeText(result.link).then(() => {
+                    copyBtn.textContent = '✓ Copied';
+                    setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+                });
+            });
+            actionCell.appendChild(copyBtn);
+
+            row.appendChild(rankCell);
+            row.appendChild(ipCell);
+            row.appendChild(latencyCell);
+            row.appendChild(actionCell);
+            els.tbody.appendChild(row);
+        });
+    }
+
+    function finishScan() {
+        if (currentSocket) {
+            currentSocket.close();
+            currentSocket = null;
+        }
+        currentScanId = null;
+        els.btnStart.disabled = false;
+        els.btnStop.disabled = true;
+        els.progBar.value = 100;
+        els.progPercent.textContent = '100%';
+    }
+
+    els.btnStop.addEventListener('click', async () => {
+        if (!currentScanId) {
+            addLog('⚠️ No active scan to stop.');
+            return;
+        }
+
+        els.btnStop.disabled = true;
+        addLog('🛑 Stopping scan...');
+
+        try {
+            const response = await fetch(`/scan/${currentScanId}/cancel`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (response.ok) {
+                addLog('✅ Cancel signal sent to backend.');
+            } else {
+                addLog('⚠️ Backend cancel request failed.');
+            }
+        } catch (error) {
+            addLog(`⚠️ Error sending cancel: ${error.message}`);
+        }
+
+        // Close WebSocket immediately (backend will stop soon)
+        if (currentSocket) {
+            currentSocket.close();
+        }
+
+        // Save scan config for resume
+        lastStoppedScan = {
+            template: els.template.value,
+            targets: els.targets.value,
+            mode: getSelectedMode(),
+            dns: els.dns.value,
+            forceDns: els.forceDns.checked,
+            maxResults: els.maxResults.value,
+            maxWorkers: els.maxWorkers.value
+        };
+
+        // Enable resume button
+        els.btnResume.disabled = false;
+        addLog('💡 Click "Resume" to continue from where you stopped.');
+
+        finishScan();
+    });
+
+    els.btnCopyAll.addEventListener('click', () => {
+        if (validLinks.length === 0) {
+            alert("No valid links to copy yet!");
+            return;
+        }
+        const text = validLinks.join('\n');
+        navigator.clipboard.writeText(text).then(() => {
+            alert(`Copied ${validLinks.length} links to clipboard!`);
+        });
+    });
+
+    els.btnExportFile.addEventListener('click', () => {
+        if (validLinks.length === 0) {
+            alert("No results to export yet!");
+            return;
+        }
+
+        const text = validLinks.join('\n');
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `cdn-scanner-results-${Date.now()}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        addLog(`💾 Exported ${validLinks.length} link(s) to file`);
+    });
+
+    // File Import Handler
+    els.btnImportFile.addEventListener('click', () => {
+        els.fileImport.click();
+    });
+
+    els.fileImport.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        els.fileStatus.textContent = `Loading ${file.name}...`;
+        els.fileStatus.style.color = 'var(--text-muted)';
+
+        const reader = new FileReader();
+
+        reader.onload = (e) => {
+            const content = e.target.result;
+            const lines = content.split('\n');
+
+            // Filter out empty lines and comments
+            const validLines = lines.filter(line => {
+                const trimmed = line.trim();
+                return trimmed && !trimmed.startsWith('#');
+            });
+
+            if (validLines.length === 0) {
+                els.fileStatus.textContent = '⚠️ No valid targets found in file';
+                els.fileStatus.style.color = 'var(--danger)';
+                return;
+            }
+
+            // Append to existing content (or replace if empty)
+            const currentContent = els.targets.value.trim();
+            if (currentContent) {
+                els.targets.value = currentContent + '\n' + validLines.join('\n');
+            } else {
+                els.targets.value = validLines.join('\n');
+            }
+
+            els.fileStatus.textContent = `✅ Loaded ${validLines.length} line(s) from ${file.name}`;
+            els.fileStatus.style.color = 'var(--success)';
+
+            // Clear file input so same file can be re-imported
+            els.fileImport.value = '';
+        };
+
+        reader.onerror = () => {
+            els.fileStatus.textContent = '❌ Error reading file';
+            els.fileStatus.style.color = 'var(--danger)';
+        };
+
+        reader.readAsText(file, 'utf-8');
+    });
+
+    // DNS Test Handler
+    els.btnTestDns.addEventListener('click', async () => {
+        const dnsInput = els.dns.value.trim();
+        if (!dnsInput) {
+            addLog('⚠️ Enter DNS servers to test (e.g., 8.8.8.8, 1.1.1.1)');
+            return;
+        }
+
+        const isE2E = els.dnsModeE2E.checked;
+        const mode = isE2E ? 'e2e' : 'simple';
+
+        els.btnTestDns.disabled = true;
+        els.btnTestDns.textContent = isE2E ? '🔬 E2E Testing...' : '🧪 Testing...';
+        els.dnsResults.style.display = 'none';
+        addLog(`${isE2E ? '🔬' : '🧪'} Testing DNS servers (${mode.toUpperCase()} mode)...`);
+
+        try {
+            const response = await fetch('/test-dns', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dns_list: dnsInput, mode })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                addLog(`❌ DNS Test Error: ${data.detail || 'Unknown error'}`);
+                els.dnsResults.style.display = 'none';
+                return;
+            }
+
+            // Show results in dedicated area
+            let html = `<div style="font-size: 0.9em; margin-bottom: 10px;">`;
+            html += `<strong>📊 Results</strong> (${mode.toUpperCase()} mode): ${data.working}/${data.total} working<br>`;
+            html += isE2E ? `<span style="font-size: 0.85em; color: var(--text-muted);">E2E = DNS latency + TCP ping + poisoning check</span>` : '';
+            html += `</div>`;
+
+            html += `<table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">`;
+            html += `<tr style="border-bottom: 1px solid var(--border); color: var(--text-muted);">`;
+            html += `<th style="padding: 5px; text-align: left;">Rank</th>`;
+            html += `<th style="padding: 5px; text-align: left;">DNS</th>`;
+            html += isE2E ? `<th style="padding: 5px; text-align: right;">E2E</th>` : `<th style="padding: 5px; text-align: right;">Latency</th>`;
+            html += isE2E ? `<th style="padding: 5px; text-align: center;">Clean</th>` : '';
+            html += isE2E ? `<th style="padding: 5px; text-align: center;">Reachable</th>` : '';
+            html += isE2E ? `<th style="padding: 5px; text-align: center;">Score</th>` : '';
+            html += `<th style="padding: 5px; text-align: left;">Status</th>`;
+            html += `</tr>`;
+
+            data.results.forEach((result, index) => {
+                const rank = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`;
+                const rowColor = result.working ? '' : 'opacity: 0.6;';
+
+                html += `<tr style="border-bottom: 1px solid var(--border); ${rowColor}">`;
+                html += `<td style="padding: 5px;">${rank}</td>`;
+                html += `<td style="padding: 5px;"><strong>${result.dns}</strong></td>`;
+
+                if (isE2E) {
+                    const e2eLatency = result.e2e_latency ? `${result.e2e_latency.toFixed(0)}ms` : '-';
+                    html += `<td style="padding: 5px; text-align: right;">${e2eLatency}</td>`;
+                    html += `<td style="padding: 5px; text-align: center;">${result.poisoned ? '❌' : '✅'}</td>`;
+                    html += `<td style="padding: 5px; text-align: center;">${result.reachable}</td>`;
+                    html += `<td style="padding: 5px; text-align: center;"><span style="color: ${result.score >= 80 ? 'var(--success)' : result.score >= 50 ? 'var(--warning)' : 'var(--danger)'}">${result.score}</span></td>`;
+                    html += `<td style="padding: 5px;"><span style="color: ${result.recommendation === 'EXCELLENT' ? 'var(--success)' : result.recommendation === 'DO NOT USE' ? 'var(--danger)' : 'var(--text)'}">${result.recommendation}</span></td>`;
+                } else {
+                    const latency = result.dns_latency ? `${result.dns_latency.toFixed(0)}ms` : '-';
+                    html += `<td style="padding: 5px; text-align: right;">${latency}</td>`;
+                    html += `<td style="padding: 5px;">${result.working ? '✅ Working' : `❌ ${result.error}`}</td>`;
+                }
+
+                html += `</tr>`;
+
+                // Show E2E details in expandable row
+                if (isE2E && result.details && result.details.length > 0) {
+                    html += `<tr style="background: var(--bg); font-size: 0.8em;">`;
+                    html += `<td colspan="${isE2E ? '7' : '4'}" style="padding: 5px 5px 5px 30px; color: var(--text-muted);">`;
+                    html += result.details.slice(0, 5).join('<br>');  // Show first 5 details
+                    html += `</td></tr>`;
+                }
+            });
+
+            html += `</table>`;
+
+            if (data.working > 0 && isE2E) {
+                const best = data.results[0];
+                html += `<div style="margin-top: 10px; padding: 8px; background: var(--surface); border-left: 3px solid var(--success); font-size: 0.85em;">`;
+                html += `💡 <strong>Recommendation:</strong> Use <strong>${best.dns}</strong> (${best.recommendation}, Score: ${best.score}/100)`;
+                html += `</div>`;
+            }
+
+            els.dnsResults.innerHTML = html;
+            els.dnsResults.style.display = 'block';
+
+            // Save top 3 working DNS servers
+            topDnsServers = data.results.filter(r => r.working).slice(0, 3).map(r => r.dns);
+
+            // Show "Use Top 3" button if we have working DNS
+            if (topDnsServers.length > 0) {
+                els.btnUseTop3Dns.style.display = 'inline-block';
+                els.btnUseTop3Dns.textContent = `🎯 Use Top ${topDnsServers.length} DNS`;
+            }
+
+            addLog(`✅ DNS test complete. ${data.working}/${data.total} working. Results shown below DNS field.`);
+
+        } catch (error) {
+            addLog(`❌ DNS Test Failed: ${error.message}`);
+            els.dnsResults.style.display = 'none';
+        } finally {
+            els.btnTestDns.disabled = false;
+            els.btnTestDns.textContent = '🧪 Test DNS Servers';
+        }
+    });
+
+    // "Use Top 3 DNS" button handler
+    els.btnUseTop3Dns.addEventListener('click', () => {
+        if (topDnsServers.length === 0) {
+            addLog('⚠️ No DNS servers available. Run test first.');
+            return;
+        }
+
+        // Fill DNS field with top 3 (one per line)
+        els.dns.value = topDnsServers.join('\n');
+
+        addLog(`✅ Filled Custom DNS with top ${topDnsServers.length}: ${topDnsServers.join(', ')}`);
+
+        // Hide button after use
+        els.btnUseTop3Dns.style.display = 'none';
+    });
+
+    // Resume button handler
+    els.btnResume.addEventListener('click', () => {
+        if (!lastStoppedScan) {
+            addLog('⚠️ No stopped scan to resume.');
+            return;
+        }
+
+        // Restore last scan config
+        els.template.value = lastStoppedScan.template;
+        els.targets.value = lastStoppedScan.targets;
+        els.dns.value = lastStoppedScan.dns;
+        els.forceDns.checked = lastStoppedScan.forceDns;
+        els.maxResults.value = lastStoppedScan.maxResults;
+        els.maxWorkers.value = lastStoppedScan.maxWorkers;
+
+        // Set mode
+        els.modeRadios.forEach(radio => {
+            radio.checked = (radio.value === lastStoppedScan.mode);
+        });
+
+        addLog('⏯️ Resumed last scan configuration. Click Start to continue.');
+
+        // Disable resume button (one-time use)
+        els.btnResume.disabled = true;
+        lastStoppedScan = null;
+
+        // Auto-trigger start button
+        els.btnStart.click();
+    });
+</script>
+</body>
+</html>
